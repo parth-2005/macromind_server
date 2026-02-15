@@ -1,6 +1,7 @@
 import { type Request, type Response } from "express";
 import mongoose from "mongoose";
 import Profile from "./profile.model.ts";
+import Auth from "../auth/auth.model.ts";
 
 export const createProfile = async (req: Request, res: Response) => {
     try {
@@ -9,7 +10,7 @@ export const createProfile = async (req: Request, res: Response) => {
         // Validate required fields
         if (!name || !phoneNumber || !preferences || !location) {
             return res.status(400).json({ message: "All fields are required" });
-        }   
+        }
 
         // Validate preferences is an array
         if (!Array.isArray(preferences)) {
@@ -40,6 +41,41 @@ export const createProfile = async (req: Request, res: Response) => {
         res.status(201).json(profile);
     } catch (error: any) {
         console.error("Error creating profile:", error);
+        res.status(500).json({ message: error.message || "Internal server error" });
+    }
+};
+
+export const getCurrentUserProfile = async (req: Request, res: Response) => {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const profile = await Profile.findOne({ userId: userId as any });
+        if (!profile) {
+            return res.status(404).json({ message: "Profile not found" });
+        }
+
+        // Fetch email from Auth model
+        const auth = await Auth.findById(userId);
+        const email = auth?.email || '';
+
+        // Return profile with email included
+        const profileData = profile.toObject() as any;
+        res.json({
+            _id: profileData._id,
+            userId: profileData.userId,
+            name: profileData.name,
+            phoneNumber: profileData.phoneNumber,
+            email: email,
+            preferences: profileData.preferences,
+            location: profileData.location,
+            createdAt: profileData.createdAt,
+            updatedAt: profileData.updatedAt,
+        });
+    } catch (error: any) {
+        console.error("Error fetching profile:", error);
         res.status(500).json({ message: error.message || "Internal server error" });
     }
 };

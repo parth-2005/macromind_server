@@ -1,22 +1,35 @@
 import Auth from "./auth.model.ts";
+import Profile from "../profile/profile.model.ts"; // Import Profile model for atomic registration
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { type Request, type Response } from "express";
 import { generateAccessToken, generateRefreshToken, hashToken } from "../../shared/utils/token.utils.ts";
+import mongoose from "mongoose";
 
 export const register = async (req: Request, res: Response) => {
     try {
-        const { email, password } = req.body;
-        if (!email || !password) {
-            return res.status(400).json({ message: "All fields are required" });
+        // 1. Destructure ALL data
+        const {
+            email,
+            password,
+            name,
+            phoneNumber,
+            preferences,
+            location
+        } = req.body;
+
+        // 2. Validation
+        if (!email || !password || !name || !phoneNumber || !preferences || !location) {
+            return res.status(400).json({ message: "Missing required fields" });
         }
 
+        // 3. Check for existing user
         const existingUser = await Auth.findOne({ email });
         if (existingUser) {
             return res.status(409).json({ message: "User already exists" });
         }
 
-        // create 2 tokens (access and refresh)
+        // 4. Create Auth User
         const accessToken = generateAccessToken({ email });
         const refreshToken = generateRefreshToken({ email });
         const hashedRefreshToken = hashToken(refreshToken);
@@ -26,12 +39,46 @@ export const register = async (req: Request, res: Response) => {
             password,
             refreshToken: hashedRefreshToken,
         });
-        await newUser.save();
 
-        res.status(201).json({ accessToken, refreshToken });
+        // SAVE STEP 1: Save the User Account
+        const savedUser = await newUser.save();
+
+        // 5. Create Linked Profile immediately
+        try {
+            const newProfile = new Profile({
+                userId: savedUser._id,
+                name,
+                phoneNumber,
+                preferences,
+                location
+            });
+
+            // SAVE STEP 2: Save the Profile
+            await newProfile.save();
+
+        } catch (profileError) {
+            // MANUAL ROLLBACK: 
+            // If Profile creation fails, delete the User we just created.
+            // This prevents "Ghost Users" (Auth without Profile).
+            console.error("Profile creation failed, rolling back User:", profileError);
+            await Auth.findByIdAndDelete(savedUser._id);
+            throw profileError; // Re-throw to hit the main catch block
+        }
+
+        // 6. Return Success
+        res.status(201).json({
+            accessToken,
+            refreshToken,
+            user: {
+                email: savedUser.email,
+                name: name,
+                isProfileComplete: true
+            }
+        });
+
     } catch (error: any) {
-        console.error("Error creating user:", error);
-        res.status(500).json({ message: error.message || "Internal server error" });
+        console.error("Registration error:", error);
+        res.status(500).json({ message: error.message || "Registration failed" });
     }
 };
 
@@ -57,7 +104,29 @@ export const login = async (req: Request, res: Response) => {
 
         // store refresh token in db
         await Auth.findOneAndUpdate({ email }, { refreshToken: hashedRefreshToken });
-        res.json({ accessToken, refreshToken: newRefreshToken });
+
+        // NEW: Check Profile Status for self-healing
+        const userProfile = await Profile.findOne({ userId: user._id as any });
+
+        // Return status to frontend
+        res.json({
+            accessToken,
+            refreshToken: newRefreshToken,
+            onboardingStatus: userProfile ? "COMPLETE" : "INCOMPLETE_PROFILE",
+            user: userProfile ? {
+                email: user.email,
+                name: userProfile.name,
+                isProfileComplete: true
+            } : {
+                email: user.email,
+                isProfileComplete: false
+            }
+        });
+
+        // Frontend Logic:
+        // If "COMPLETE" -> Go to Swipe Deck
+        // If "INCOMPLETE_PROFILE" -> Go to "Finish Setup" Screen
+
     } catch (error: any) {
         console.error("Error logging in:", error);
         res.status(500).json({ message: error.message || "Internal server error" });
